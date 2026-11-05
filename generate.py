@@ -302,31 +302,14 @@ class StackedRandomGenerator:
         assert size[0] == len(self.generators)
         return torch.stack([torch.randn(size[1:], generator=gen, **kwargs) for gen in self.generators])
 
-    def rand_beta_prime(self, size, N=3072, D=128, **kwargs):
-        # sample from beta_prime (N/2, D/2)
-        # print(f"N:{N}, D:{D}")
-        assert size[0] == len(self.seeds)
-        latent_list = []
-        beta_gen = Beta(torch.FloatTensor([N / 2.]), torch.FloatTensor([D / 2.]))
-        for seed in self.seeds:
-            torch.manual_seed(seed)
-            sample_norm = beta_gen.sample().to(kwargs['device']).double()
-            # inverse beta distribution
-            inverse_beta = sample_norm / (1-sample_norm)
-
-            if N < 256 * 256 * 3:
-                sigma_max = 80
-            else:
-                sigma_max = kwargs['sigma_max']
-
-            sample_norm = torch.sqrt(inverse_beta) * sigma_max * np.sqrt(D)
-            gaussian = torch.randn(N).to(sample_norm.device)
-            unit_gaussian = gaussian / torch.norm(gaussian, p=2)
-            init_sample = unit_gaussian * sample_norm
-            latent_list.append(init_sample.reshape((1, *size[1:])))
-
-        latent = torch.cat(latent_list, dim=0)
-        return latent
+    def rand_beta_prime(self, size, D=128, sigma_max=80, **kwargs):
+        latents = self.randn(size, **kwargs)
+        samples = []
+        with torch.random.fork_rng(devices=[]):
+            for seed, latent in zip(self.seeds, latents):
+                torch.random.default_generator.manual_seed(int(seed) % (1 << 32))
+                samples.append(sample_noise_pfgmpp(latents=latent[None], sigma=sigma_max, D=D))
+        return torch.cat(samples)
 
     def randn_like(self, input):
         return self.randn(input.shape, dtype=input.dtype, layout=input.layout, device=input.device)
@@ -417,6 +400,10 @@ def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=
     sampler_type = sampler_kwargs.pop('sampler', 'fm')
     sampler_kwargs = {key: value for key, value in sampler_kwargs.items() if value is not None}
     have_ablation_kwargs = any(x in sampler_kwargs for x in ['solver', 'discretization', 'schedule', 'scaling'])
+    if pfgmpp and (sampler_type != 'edm' or have_ablation_kwargs):
+        raise click.ClickException('PFGM++ generation requires --sampler=edm without ablation options')
+    if sampler_type == 'edm' and sampler_kwargs.get('num_steps', 18) < 2:
+        raise click.ClickException('EDM sampling requires --steps >= 2')
 
     if have_ablation_kwargs:
         sampler_fn = ablation_sampler 
@@ -443,25 +430,14 @@ def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=
         if batch_size == 0:
             continue
 
-        N = net.img_channels * net.img_resolution * net.img_resolution
         # Pick latents and labels.
         rnd = StackedRandomGenerator(device, batch_seeds)
-
-        # if pfgmpp:
-        #     latents = rnd.rand_beta_prime([batch_size, net.img_channels, net.img_resolution, net.img_resolution],
-        #                         N=N,
-        #                         D=aug_dim,
-        #                         pfgmpp=pfgmpp,
-        #                         device=device,
-        #                         sigma_max=sampler_kwargs['sigma_max'] if (N > 256 * 256 * 3) else 80)
-        # else:
-        #     latents = rnd.randn([batch_size, net.img_channels, net.img_resolution, net.img_resolution],
-        #                         device=device)
-
-        latents = rnd.randn([batch_size, net.img_channels, net.img_resolution, net.img_resolution],
-                                device=device)
+        latent_shape = [batch_size, net.img_channels, net.img_resolution, net.img_resolution]
         if pfgmpp:
-            latents = sample_noise_pfgmpp(latents=latents, sigma=80, D=aug_dim)
+            sigma_max = min(sampler_kwargs.get('sigma_max', 80), net.sigma_max)
+            latents = rnd.rand_beta_prime(latent_shape, D=aug_dim, sigma_max=sigma_max, device=device)
+        else:
+            latents = rnd.randn(latent_shape, device=device)
         
         class_labels = None
         if net.label_dim:

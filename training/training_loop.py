@@ -19,7 +19,6 @@ import dnnlib
 from torch_utils import distributed as dist
 from torch_utils import training_stats
 from torch_utils import misc
-from training.clique_dataloader import CliqueDataLoader
 
 #----------------------------------------------------------------------------
 
@@ -75,6 +74,7 @@ def training_loop(
     dataset_obj = dnnlib.util.construct_class_by_name(**dataset_kwargs) # subclass of training.dataset.Dataset
     
     if use_clique:
+        from training.clique_dataloader import CliqueDataLoader
         dist.print0(f'Building clique dataloader (k={clique_k}, size={clique_min_size}-{clique_max_size})...')
         clique_loader = CliqueDataLoader(
             base_dataset=dataset_obj,

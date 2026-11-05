@@ -18,18 +18,21 @@ compute_fid() {
     return 2
   fi
 
-  local last_seed=$((max_images - 1))
-  local seeds="0-${last_seed}"
+  local last_seed=$((SEED_START + max_images - 1))
+  local seeds="${SEED_START}-${last_seed}"
 
-  rm -rf "$outdir"
+  if [[ -e "$outdir" ]]; then
+    echo "Output already exists; choose a fresh outdir_base: $outdir" >&2
+    return 2
+  fi
 
   torchrun --standalone --nproc_per_node="$nproc" generate.py \
     --outdir="$outdir" --seeds="$seeds" --subdirs \
-    --network="$network_path" --sampler="$gen_sampler" --steps="$gen_steps" --batch="$gen_batch" --pfgmpp="$gen_pfgmpp" --aug_dim="$aug_dim"
+    --network="$network_path" --sampler="$gen_sampler" --steps="$gen_steps" --batch="$gen_batch" --pfgmpp="$gen_pfgmpp" --aug_dim="$aug_dim" >&2
 
   torchrun --standalone --nproc_per_node="$nproc" fid.py calc \
     --images="$outdir" --ref="$ref_path" --num="$max_images" \
-  | awk '/^[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$/ {v=$0} END{print v}'
+  | awk '/^[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$/ {v=$0} END{if (v == "") exit 1; print v}'
 }
 
 csv_escape() {
@@ -55,7 +58,7 @@ extract_kimg() {
 
 usage() {
   echo "Usage: $0 <ckpt_dir> <ref_npz> [csv_path] [max_images] [min_kimg] [step_kimg] [outdir_base] [sampler] [pfgmpp] [aug_dim]"
-  echo "Env overrides: NPROC (default 8), GEN_BATCH (default 512), GEN_STEPS (default 50), AUG_DIM (default 128)"
+  echo "Env overrides: NPROC (default 2), GEN_BATCH (default 512), GEN_STEPS (default 50), AUG_DIM (default 128), SEED_START (default 0)"
 }
 
 ckpt_dir="${1:-}"
@@ -74,9 +77,14 @@ if [[ -z "$ckpt_dir" || -z "$ref" ]]; then
   exit 2
 fi
 
-NPROC="${NPROC:-8}"
+NPROC="${NPROC:-2}"
 GEN_BATCH="${GEN_BATCH:-512}"
 GEN_STEPS="${GEN_STEPS:-50}"
+SEED_START="${SEED_START:-0}"
+if [[ ! "$SEED_START" =~ ^[0-9]+$ ]]; then
+  echo "SEED_START must be a nonnegative integer" >&2
+  exit 2
+fi
 
 mkdir -p "$(dirname "$csv_path" 2>/dev/null || echo ".")"
 
@@ -84,7 +92,10 @@ if [[ ! -f "$csv_path" ]]; then
   echo "fid,checkpoint,kimg" > "$csv_path"
 fi
 
-mapfile -t pkls < <(find "$ckpt_dir" -type f -name "*.pkl" | sort)
+pkls=()
+while IFS= read -r pkl; do
+  pkls+=("$pkl")
+done < <(find "$ckpt_dir" -type f -name "network-snapshot-*.pkl" | sort)
 
 if [[ "${#pkls[@]}" -eq 0 ]]; then
   echo "No .pkl files found under: $ckpt_dir" >&2

@@ -77,7 +77,7 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 train.py \
     --data=datasets/cifar10-32x32.zip \
     --precond=edm-interpolant \
     --batch=256 \
-    --tick 10 \
+    --tick 10
 ```
 
 - N=2048:
@@ -85,12 +85,12 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 train.py \
 nproc=2
 N=$((2048 * nproc))
 B=256
-CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --standalone --nproc_per_node=2 train.py \
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 train.py \
     --outdir=training-runs-edm-interp-x0 \
     --cond=0 \
     --data=datasets/cifar10-32x32.zip \
     --precond=edm-multi-interpolant \
-    --batch=$B \
+    --batch=$N \
     --multi-target-batch-size-for-loss $B \
     --tick 10
 ```
@@ -106,7 +106,7 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 train.py \
     --batch=256 \
     --tick 10 \
     --pfgmpp=1 \
-    --pfgmpp_aug_dim 2048
+    --pfgmpp_aug_dim 128
 ```
 
 - N=2048:
@@ -129,7 +129,7 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 train.py \
 
 - Compute the reference statistics for your dataset as follows:
 
-```.bash
+```bash
 python fid.py ref --data=datasets/my-dataset.zip --dest=fid-refs/my-dataset.npz
 ```
 
@@ -147,15 +147,20 @@ for dir in "${dirs[@]}"; do
 
     outdir="fid-out-gens/${dir_name}"
     
-    # Determine sampler based on directory name
-    if [[ "$dir" == *"edm"* ]]; then
-        sampler="edm"
-    else
-        sampler="fm"
-    fi
+    read -r sampler pfgmpp aug_dim < <(
+        python - "$dir/training_options.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as f:
+    loss = json.load(f)["loss_kwargs"]
+sampler = "fm" if "FlowMatching" in loss["class_name"] else "edm"
+print(sampler, int(loss.get("pfgmpp", False)), loss.get("D", 128))
+PY
+    )
 
     echo "Running FID for $dir with sampler $sampler and outdir $outdir"
     
-    bash scripts/many_fid.sh $dir fid-refs/cifar10-32x32.npz "$csv_name" 50000 0 5000 $outdir $sampler
+    bash scripts/many_fid.sh "$dir" fid-refs/cifar10-32x32.npz "$csv_name" 50000 0 5000 "$outdir" "$sampler" "$pfgmpp" "$aug_dim"
 done
 ```
