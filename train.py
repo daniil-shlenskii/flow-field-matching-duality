@@ -49,16 +49,16 @@ def parse_int_list(s):
 
 # Flow Matching options.
 @click.option('--flow-matching-scale', help='Scale for flow matching', metavar='FLOAT', type=click.FloatRange(min=0, min_open=False), default=0.1, show_default=True)
-@click.option('--multi-target-batch-size-for-loss', help='batch size for multi-sample flow matching to compute loss on: xt = xt[:batch_size_for_loss, ...]', metavar='INT', type=click.IntRange(min=1))
+@click.option('--multi-target-batch-size-for-loss', help='Global query/loss batch B for multi-sample objectives', metavar='INT', type=click.IntRange(min=1))
 @click.option('--leave-best-out', help='Dont use xt, that lays on line between x0 and x1 for each sample in batch, when computing target field', metavar='BOOL', type=bool, default=False, show_default=True)
 
 # PFGMPP options:
 @click.option('--pfgmpp', help='Use PFGMPP', metavar='BOOL', type=bool, default=False, show_default=True)
-@click.option('--pfgmpp_aug_dim',             help='additional dimension', metavar='INT',                            type=click.IntRange(min=1), default=128, show_default=True)
+@click.option('--pfgmpp_aug_dim',             help='Auxiliary dimension D (distinct from image dimension)', metavar='INT', type=click.IntRange(min=1), default=128, show_default=True)
 
 # Hyperparameters.
 @click.option('--duration',      help='Training duration', metavar='MIMG',                          type=click.FloatRange(min=0, min_open=True), default=200, show_default=True)
-@click.option('--batch',         help='Total batch size', metavar='INT',                            type=click.IntRange(min=1), default=256, show_default=True)
+@click.option('--batch',         help='Global image batch; for multi-sample objectives, local pool N times GPU count', metavar='INT', type=click.IntRange(min=1), default=256, show_default=True)
 @click.option('--batch-gpu',     help='Limit batch size per GPU', metavar='INT',                    type=click.IntRange(min=1))
 @click.option('--cbase',         help='Channel multiplier  [default: varies]', metavar='INT',       type=int)
 @click.option('--cres',          help='Channels per resolution  [default: varies]', metavar='LIST', type=parse_int_list)
@@ -104,6 +104,17 @@ def main(**kwargs):
         --data=datasets/cifar10-32x32.zip --cond=1 --arch=ddpmpp
     """
     opts = dnnlib.EasyDict(kwargs)
+    world_size = int(os.environ.get('WORLD_SIZE', '1'))
+    if opts.batch % world_size:
+        raise click.ClickException('--batch must be divisible by the number of GPUs')
+    if opts.precond in ['multi-fm', 'edm-multi-interpolant']:
+        query_batch = opts.multi_target_batch_size_for_loss
+        if query_batch is None or query_batch % world_size or not world_size <= query_batch <= opts.batch:
+            raise click.ClickException('--multi-target-batch-size-for-loss must be positive, divisible by the number of GPUs, and <= --batch')
+        if opts.batch_gpu is not None and opts.batch_gpu < opts.batch // world_size:
+            raise click.ClickException('Multi-sample targets require the full local pool; omit --batch-gpu')
+    if opts.pfgmpp and opts.precond not in ['edm-interpolant', 'edm-multi-interpolant']:
+        raise click.ClickException('--pfgmpp requires --precond=edm-interpolant or edm-multi-interpolant')
     torch.multiprocessing.set_start_method('spawn')
     dist.init()
 
@@ -161,7 +172,6 @@ def main(**kwargs):
         c.loss_kwargs.class_name = 'training.loss.EDMInterpolantLoss'
         c.loss_kwargs.update(pfgmpp=opts.pfgmpp)
         c.loss_kwargs.update(D=opts.pfgmpp_aug_dim)
-        # c.loss_kwargs.update(N=c.dataset_kwargs.resolution ** 2 * 3)
     elif opts.precond == 'edm-multi-interpolant':
         c.network_kwargs.class_name = 'training.networks.EDMPrecond'
         c.loss_kwargs.class_name = 'training.loss.EDMMultiInterpolantLoss'
@@ -170,7 +180,6 @@ def main(**kwargs):
         c.loss_kwargs.update(leave_best_out=opts.leave_best_out)
         c.loss_kwargs.update(pfgmpp=opts.pfgmpp)
         c.loss_kwargs.update(D=opts.pfgmpp_aug_dim)
-        # c.loss_kwargs.update(N=c.dataset_kwargs.resolution ** 2 * 3)
 
     else:
         assert opts.precond == 'edm'

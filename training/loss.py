@@ -8,9 +8,7 @@
 """Loss functions used in the paper
 "Elucidating the Design Space of Diffusion-Based Generative Models"."""
 
-from sympy.geometry import ellipse
 import torch
-from torch.onnx.symbolic_opset9 import view_as
 from torch_utils import persistence
 import numpy as np
 
@@ -277,7 +275,7 @@ class MultiSampleFlowMatchingInterpolantLoss:
 
 @persistence.persistent_class
 class EDMInterpolantLoss:
-    def __init__(self, P_mean=-1.2, P_std=1.2, sigma_data=0.5, D=128, N=3072, pfgmpp=False):
+    def __init__(self, P_mean=-1.2, P_std=1.2, sigma_data=0.5, D=128, N=None, pfgmpp=False):
         self.P_mean = P_mean
         self.P_std = P_std
         self.sigma_data = sigma_data
@@ -298,8 +296,9 @@ class EDMInterpolantLoss:
             #### One-sided interpolant: x_sigma = x0 + R * v = x0 + r * sqrt(R2) * v = x0 + sigma * sqrt(D R2) * v
             #### velocity = d x_sigma / (d sigma) = sqrt(D R2) * v, v = u / ||u||
     
+            data_dim = x0[0].numel()
             r = sigma.flatten().double() * np.sqrt(self.D).astype(np.float64)
-            samples_norm = np.random.beta(a=self.N / 2., b=self.D / 2., size=images.shape[0]).astype(np.double)
+            samples_norm = np.random.beta(a=data_dim / 2., b=self.D / 2., size=images.shape[0]).astype(np.double)
             samples_norm = np.clip(samples_norm, 1e-3, 1-1e-3)
 
             inverse_beta = samples_norm / (1 - samples_norm + 1e-8)
@@ -308,7 +307,7 @@ class EDMInterpolantLoss:
             samples_norm = r * torch.sqrt(inverse_beta + 1e-8)
             samples_norm = samples_norm.view(len(samples_norm), -1)
 
-            gaussian = torch.randn(images.shape[0], self.N).to(samples_norm.device)
+            gaussian = torch.randn(images.shape[0], data_dim).to(samples_norm.device)
             unit_gaussian = gaussian / torch.norm(gaussian, p=2, dim=1, keepdim=True)
 
             perturbation_x = (unit_gaussian * samples_norm).float()
@@ -329,7 +328,7 @@ class EDMInterpolantLoss:
 class EDMMultiInterpolantLoss:
     def __init__(
         self,
-        P_mean=-1.2, P_std=1.2, sigma_data=0.5, D=128, N=3072, pfgmpp=False, 
+        P_mean=-1.2, P_std=1.2, sigma_data=0.5, D=128, N=None, pfgmpp=False,
         batch_size_for_loss=None, leave_best_out=False,
         chunk_size=None
     ):
@@ -337,7 +336,7 @@ class EDMMultiInterpolantLoss:
         self.P_std = P_std
         self.sigma_data = sigma_data
         self.D = D
-        self.N = N  # data dimensionalty
+        self.N = N
         self.pfgmpp = pfgmpp
         self.batch_size_for_loss = batch_size_for_loss
         self.leave_best_out = leave_best_out
@@ -354,9 +353,8 @@ class EDMMultiInterpolantLoss:
 
         diff_sq = torch.linalg.norm((x_sigma_expanded - x0_expanded).flatten(1), dim=1) ** 2    # [B*N] || [B*N, C, H, W] -- flatten -- > [B*N, D]
         if self.pfgmpp:
-            print(f"PFGMPP:")
             r_sq = self.D * sigma_expanded.flatten(0) ** 2 # [B*N]
-            log_weights = -(self.N + self.D) / 2 * torch.log(diff_sq + r_sq + 1e-8)
+            log_weights = -(C * H * W + self.D) / 2 * torch.log(diff_sq + r_sq + 1e-8)
             log_weights = log_weights.view(B, N)
 
         else:
@@ -411,7 +409,7 @@ class EDMMultiInterpolantLoss:
 
             if self.pfgmpp:
                 r_sq = self.D * sigma_exp.reshape(B, cs) ** 2
-                log_w = -(self.N + self.D) / 2 * torch.log(diff_sq + r_sq + 1e-8)
+                log_w = -(C * H * W + self.D) / 2 * torch.log(diff_sq + r_sq + 1e-8)
             else:
                 gauss_arg = diff_sq / (2 * sigma_exp.reshape(B, cs) ** 2)
                 log_w = -gauss_arg
@@ -452,8 +450,9 @@ class EDMMultiInterpolantLoss:
         # weight = sigma ** 2 * weight
 
         if self.pfgmpp:
+            data_dim = images[0].numel()
             r = sigma.flatten().double() * np.sqrt(self.D).astype(np.float64)
-            samples_norm = np.random.beta(a=self.N / 2., b=self.D / 2., size=B).astype(np.double)
+            samples_norm = np.random.beta(a=data_dim / 2., b=self.D / 2., size=B).astype(np.double)
             samples_norm = np.clip(samples_norm, 1e-3, 1-1e-3)
 
             inverse_beta = samples_norm / (1 - samples_norm + 1e-8)
@@ -462,7 +461,7 @@ class EDMMultiInterpolantLoss:
             samples_norm = r * torch.sqrt(inverse_beta + 1e-8)
             samples_norm = samples_norm.view(len(samples_norm), -1)
 
-            gaussian = torch.randn(B, self.N).to(samples_norm.device)
+            gaussian = torch.randn(B, data_dim).to(samples_norm.device)
             unit_gaussian = gaussian / torch.norm(gaussian, p=2, dim=1, keepdim=True)
 
             perturbation_x = (unit_gaussian * samples_norm).float()
